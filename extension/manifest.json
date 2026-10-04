@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "EaaP Agent Extension",
+  "version": "1.0.0",
+  "permissions": [
+    "webRequest",
+    "storage",
+    "tabs",
+    "scripting",
+    "cookies"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  }
+}
