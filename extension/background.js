@@ -14,6 +14,8 @@ let reconnectTimer = null;
 const sampleBuffer = [];
 const pendingSamples = new PendingSamples();
 const MAX_BUFFER = 200;
+const MAX_FLUSH_BYTES = 1 << 20;
+const utf8 = new TextEncoder();
 let flushInFlight = false;
 
 chrome.webRequest.onBeforeRequest.addListener(
@@ -78,19 +80,35 @@ setInterval(async () => {
   pendingSamples.prune();
   if (sampleBuffer.length === 0 || flushInFlight) return;
   flushInFlight = true;
-  const batch = sampleBuffer.splice(0, sampleBuffer.length);
+  const batch = [];
+  const encoded = [];
+  let bytes = utf8.encode('{"samples":[]}').byteLength;
+  while (sampleBuffer.length > 0) {
+    const sample = sampleBuffer[0];
+    const json = JSON.stringify(sample);
+    const size = utf8.encode(json).byteLength;
+    // An individually unrepresentable sample must not starve later captures.
+    if (size + 14 > MAX_FLUSH_BYTES) { sampleBuffer.shift(); continue; }
+    const added = size + (batch.length ? 1 : 0);
+    if (bytes + added > MAX_FLUSH_BYTES) break;
+    sampleBuffer.shift();
+    batch.push(sample);
+    encoded.push(json);
+    bytes += added;
+  }
   try {
+    if (batch.length === 0) return;
     const response = await fetch(allowlist.discovery_url, {
       method: 'POST',
       signal: AbortSignal.timeout(5000),
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ samples: batch }),
+      body: '{"samples":[' + encoded.join(',') + ']}',
     });
     if (!response.ok) throw new Error('discovery refused batch');
   } catch (e) {
     // reconnect later; re-buffer on failure
-    sampleBuffer.push(...batch);
-    if (sampleBuffer.length > MAX_BUFFER) sampleBuffer.splice(0, sampleBuffer.length - MAX_BUFFER);
+    sampleBuffer.unshift(...batch);
+    if (sampleBuffer.length > MAX_BUFFER) sampleBuffer.length = MAX_BUFFER;
   } finally {
     flushInFlight = false;
   }

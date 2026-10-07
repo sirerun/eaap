@@ -105,3 +105,34 @@ test('deep raw metadata is truncated without retaining values', () => {
  assert.equal(shape.includes('private fixture value'),false);
  assert.equal(shape.includes('truncated'),true);
 });
+
+test('discovery splits aggregate UTF-8 bytes and retries an owned batch without loss', async () => {
+ const prior={chrome:globalThis.chrome,WebSocket:globalThis.WebSocket,fetch:globalThis.fetch,setInterval:globalThis.setInterval};
+ const listeners={},accepted=[];let flush,failed=false;
+ const event=name=>({addListener:fn=>{listeners[name]=fn}});
+ globalThis.chrome={webRequest:{onBeforeRequest:event('start'),onBeforeSendHeaders:event('headers'),onCompleted:event('done'),onErrorOccurred:event('error')}};
+ globalThis.WebSocket=class {static OPEN=1;readyState=0;close(){}};
+ globalThis.fetch=async(_url,options)=>{
+  assert.ok(new TextEncoder().encode(options.body).byteLength<=1<<20,'gateway request exceeds 1 MiB');
+  if(!failed){failed=true;throw Error('controlled transient failure')}
+  accepted.push(...JSON.parse(options.body).samples.map(s=>s.request_id));
+  return {ok:true};
+ };
+ globalThis.setInterval=fn=>{flush=fn;return 1};
+ try {
+  await import('./background.js?flush-byte-regression');
+  const payload=Object.fromEntries(Array.from({length:64},(_,i)=>['field'+i+'x'.repeat(55),'synthetic']));
+  const raw=new TextEncoder().encode(JSON.stringify(payload)).buffer;
+  for(let i=0;i<200;i++){
+   const request={url:'http://127.0.0.1:18132/api/opaque',initiator:'http://127.0.0.1:18132',method:'POST',type:'xmlhttprequest',requestId:String(i)};
+   listeners.start({...request,requestBody:{raw:[{bytes:raw}]}});
+   listeners.headers({...request,requestHeaders:Array.from({length:64},(_,j)=>({name:'x-fixture-'+j+'z'.repeat(40),value:'private'}))});
+   listeners.done({...request,statusCode:200});
+  }
+  for(let i=0;i<10;i++)await flush();
+  assert.equal(failed,true);
+  assert.deepEqual(accepted,Array.from({length:200},(_,i)=>String(i)));
+ } finally {
+  for(const [key,value] of Object.entries(prior)){if(value===undefined)delete globalThis[key];else globalThis[key]=value}
+ }
+});
