@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -16,23 +15,31 @@ import (
 )
 
 type Gateway struct {
-	cfg          *Config
-	llm          *LLMClient
-	queue        *ActionQueue
-	bridge       *ExtensionBridge
-	mu           sync.RWMutex
-	specs        map[string]map[string]interface{}
-	routeOrigins map[string]string
+	cfg        *Config
+	llm        *LLMClient
+	bridge     *ExtensionBridge
+	mu         sync.RWMutex
+	candidates map[string]map[string]interface{}
+	operations map[string]PromotedOperation
+}
+
+// PromotedOperation is server-owned executable metadata. Discovery candidates
+// never enter this registry automatically; T4.2 must also gate execution.
+type PromotedOperation struct {
+	ID            string
+	Version       string
+	Origin        string
+	Method        string
+	RequestSchema map[string]interface{}
 }
 
 func NewGateway(cfg *Config) *Gateway {
 	return &Gateway{
-		cfg:          cfg,
-		llm:          NewLLMClient(cfg),
-		queue:        NewActionQueue(cfg),
-		bridge:       NewExtensionBridge(),
-		specs:        make(map[string]map[string]interface{}),
-		routeOrigins: make(map[string]string),
+		cfg:        cfg,
+		llm:        NewLLMClient(cfg),
+		bridge:     NewExtensionBridge(cfg.PairingCredentials),
+		candidates: make(map[string]map[string]interface{}),
+		operations: make(map[string]PromotedOperation),
 	}
 }
 
@@ -100,8 +107,7 @@ func (g *Gateway) handleDiscoveryIngest(w http.ResponseWriter, r *http.Request) 
 			continue
 		}
 		g.mu.Lock()
-		g.specs[key] = spec
-		g.routeOrigins[key] = samples[0].Host
+		g.candidates[key] = spec
 		g.mu.Unlock()
 		log.Printf("[EAAP] schema inferred for route %s", key)
 	}
@@ -118,7 +124,7 @@ func (g *Gateway) handleGetSpec(w http.ResponseWriter, _ *http.Request) {
 		"paths":   map[string]interface{}{},
 	}
 	paths := merged["paths"].(map[string]interface{})
-	for _, frag := range g.specs {
+	for _, frag := range g.candidates {
 		if fp, ok := frag["paths"].(map[string]interface{}); ok {
 			for p, def := range fp {
 				paths[p] = def
@@ -130,72 +136,7 @@ func (g *Gateway) handleGetSpec(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (g *Gateway) handleExternalRequest(w http.ResponseWriter, r *http.Request) {
-	routeKey := strings.ToUpper(r.Method) + " " + normalizeRequestPath(r.URL.Path)
-	g.mu.RLock()
-	_, known := g.specs[routeKey]
-	origin := g.routeOrigins[routeKey]
-	g.mu.RUnlock()
-	if !known {
-		http.Error(w, fmt.Sprintf("no inferred schema for %s", routeKey), http.StatusNotFound)
-		return
-	}
-	if !isAllowedOrigin(g.cfg.AllowedOrigins, origin) {
-		http.Error(w, "route origin is not allowlisted", http.StatusForbidden)
-		return
-	}
-
-	var body []byte
-	if r.Body != nil {
-		var err error
-		body, err = io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
-		if err != nil {
-			http.Error(w, "request body too large or unreadable", http.StatusRequestEntityTooLarge)
-			return
-		}
-	}
-
-	env := EaaPEnvelope{
-		EnvelopeID:    newID(),
-		ExecutionMode: ModeSyntheticFetch,
-		TargetURL:     origin + r.URL.RequestURI(),
-		Method:        r.Method,
-		Headers:       buildForwardHeaders(r),
-		Body:          body,
-		TimeoutMs:     30000,
-		Origin:        origin,
-	}
-	if r.Header.Get("X-EAAP-Mode") == "dom-simulation" {
-		env.ExecutionMode = ModeDOMSimulation
-		env.CSSTarget = r.Header.Get("X-EAAP-CSS-Target")
-		env.TriggerEvent = "click"
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-	defer cancel()
-	var response *EaaPResponse
-	if err := g.queue.Enqueue(ctx, func() error {
-		var err error
-		response, err = g.bridge.Dispatch(ctx, env)
-		return err
-	}); err != nil {
-		http.Error(w, "execution failed: "+err.Error(), http.StatusBadGateway)
-		return
-	}
-	if response == nil {
-		http.Error(w, "extension returned no response", http.StatusBadGateway)
-		return
-	}
-	if response.Error != "" {
-		http.Error(w, response.Error, http.StatusBadGateway)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	status := response.StatusCode
-	if status < 100 || status > 599 {
-		status = http.StatusOK
-	}
-	w.WriteHeader(status)
-	_, _ = w.Write(response.Body)
+	http.Error(w, "no explicitly promoted operation has an enabled T4.2 durable grant gate", http.StatusServiceUnavailable)
 }
 
 func normalizeRequestPath(path string) string {
@@ -215,19 +156,6 @@ func isAllowedOrigin(allowed []string, candidate string) bool {
 		}
 	}
 	return false
-}
-
-func buildForwardHeaders(r *http.Request) map[string]string {
-	headers := make(map[string]string)
-	for k, values := range r.Header {
-		key := strings.ToLower(k)
-		if key == "host" || key == "connection" || key == "x-eaap-mode" ||
-			key == "x-eaap-css-target" || key == "content-length" {
-			continue
-		}
-		headers[k] = strings.Join(values, ",")
-	}
-	return headers
 }
 
 func (g *Gateway) handleExtension(w http.ResponseWriter, r *http.Request) {
