@@ -1,6 +1,6 @@
 # Jarmee executor integration
 
-Status: source preflight; implementation and independent review remain open.
+Status: operation-registry/session source and controlled capture fixture implemented; independent review and durable grant execution remain open.
 
 ## Source custody
 
@@ -36,7 +36,14 @@ T4.0 contract mapping is recorded above. T4.1 and T4.2 implement the following r
 
 EAAP T4.1 source keeps inferred schemas in a discovery candidate map, separate from explicitly configured server-owned promoted operations. Each promoted operation declares exact method/path/origin and a recursively typed, closed request schema; config validation rejects unallowlisted origins, duplicate routes and fields that could override target, selectors, mode or session. Caller query strings and non-content headers are rejected; unknown, missing, mistyped and nested extra body fields are rejected. No candidate is promoted by inference. Pairing credentials are configured server-side by environment-variable name and bind tenant, account, provider, connection ID, exact generation and expiry. A stable absolute `pairing_state_root` is required; the owner must configure a private, non-symlink directory. Pairing token SHA-256 digests and consumed identities are committed under an OS file lock with fsync and atomic rename. Missing, malformed, unsafe or inaccessible state rejects pairing. No raw pairing token is written to the journal. No token is provisioned by this source lane. Active websocket sessions remain in memory, while replay and generation fences survive restart. The extension clears its one-shot local token after submission. Extension capture uses configured exact allowed origins, refuses a missing or unapproved initiator, and stores only URL templates, value-free typed body shape and header metadata; the gateway repeats the metadata-only transformation before inference. Query values, path identifiers, response bodies, arbitrary request values and header values are not buffered or sent. The external REST surface and extension executor continue to fail closed until T4.2.
 
-`node scripts/browser-fixture.mjs` is the repeatable Chrome 151 `Extensions.loadUnpacked` pipe fixture. It creates two isolated profiles, loads the EAAP extension, and checks each actual service-worker target. Its end-to-end capture assertion is retained as a strict gate: in this DGX run, Chrome's tab creation returned a permanently `loading` tab and neither local fixture HTTP server received a request, so the two-profile capture assertion did not pass. The worker itself loaded and its `chrome.webRequest` permission was present. Do not treat worker observation alone as browser capture qualification.
+`node scripts/browser-fixture.mjs` is the repeatable Chrome 151 `Extensions.loadUnpacked` pipe fixture. It creates two isolated profiles, loads the EAAP extension, and checks each actual service-worker target. Each profile must load the actual service worker with all three webRequest listeners and deliver its own captured POST to the local discovery endpoint. Both profile pages reach complete state, and query/header/body secret markers are absent from the captured payload. This controlled capture gate passed on native ARM64 Chrome 151.0.7922.137 on DGX.
+
+The initial run loaded the extension but navigation stalled. A fresh Chrome profile without EAAP reproduced that failure. Selecting --password-store=basic made the baseline request complete, then made both EAAP profile captures pass. This setting applies only to newly created synthetic fixture profiles; it never reads or changes an existing user profile or keyring. Chromium documents that this selects plaintext storage, so these disposable profiles must never contain real credentials. Short private DGX temporary directories are required for Chrome's Unix singleton socket length limit; cleanup removes only directories created by the fixture.
+
+Evidence: task receipts browser-network-debug.log (initial failure), chrome-network-baseline.log (without extension, no request), chrome-network-basic-store.log (baseline pass), browser-profile-assertions.log (two separate capture passes). Node unit tests and gateway race/vet checks are separate source checks. This does not prove concurrent real account routing, durable grant consumption, browser action execution or any social platform acceptance.
+
+Primary browser reference: [Chromium Linux password storage](https://chromium.googlesource.com/chromium/src/+/HEAD/docs/linux/password_storage.md).
+
 
 ## Baseline gaps
 
