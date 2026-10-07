@@ -192,3 +192,15 @@ test('completed captures never transmit ordinary-name path identifiers', async (
   for(const [key,value] of Object.entries(prior)){if(value===undefined)delete globalThis[key];else globalThis[key]=value}
  }
 });
+
+test('template UTF-8 byte limit is checked before path parsing', () => {
+ const over='/'+'€'.repeat(1366);
+ assert.ok(over.length<4096);
+ assert.ok(new TextEncoder().encode(over).byteLength>4096);
+ const originalSplit=String.prototype.split;let parsed=false;
+ String.prototype.split=function(...args){if(String(this)===over.slice(1))parsed=true;return originalSplit.apply(this,args)};
+ try {
+  assert.deepEqual(normalizeURL('https://approved.example/api/users/alice',[over]),['/{param1}/{param2}/{param3}',[]]);
+  assert.equal(parsed,false,'over-limit UTF-8 template was parsed');
+ } finally {String.prototype.split=originalSplit}
+});
