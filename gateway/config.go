@@ -20,6 +20,7 @@ type Config struct {
 	SanitizeHeaders    []string            `json:"sanitize_headers"` // RFC 6.3
 	ExtensionWSOrigin  string              `json:"extension_ws_origin"`
 	PairingCredentials []PairingCredential `json:"pairing_credentials"`
+	PromotedOperations []PromotedOperation `json:"promoted_operations"`
 }
 
 type PairingCredential struct {
@@ -63,6 +64,9 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, fmt.Errorf("pairing credential %d has no token_env", i)
 		}
 		cfg.PairingCredentials[i].Token = os.Getenv(name)
+	}
+	if err := validateGatewayConfig(cfg); err != nil {
+		return nil, err
 	}
 	return cfg, nil
 }

@@ -122,7 +122,7 @@ func TestDiscoveryCreatesSanifuCandidateAfterSanitizing(t *testing.T) {
 	apiRequest := httptest.NewRequest(http.MethodGet, "/api/users/67890", nil)
 	apiRecorder := httptest.NewRecorder()
 	gateway.handleExternalRequest(apiRecorder, apiRequest)
-	if apiRecorder.Code != http.StatusServiceUnavailable || !strings.Contains(apiRecorder.Body.String(), "T4.2") {
+	if apiRecorder.Code != http.StatusNotFound || !strings.Contains(apiRecorder.Body.String(), "no promoted operation") {
 		t.Errorf("candidate became executable: status=%d body=%q", apiRecorder.Code, apiRecorder.Body.String())
 	}
 }

@@ -102,15 +102,57 @@ func waitForSessions(t *testing.T, bridge *ExtensionBridge, count int) {
 }
 
 func TestExternalRequestsNeverDispatchCallerOverrides(t *testing.T) {
-	g := NewGateway(DefaultConfig())
-	for _, path := range []string{"/api/post", "/api/post?origin=https://attacker.invalid"} {
-		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"operation":"publish","origin":"https://attacker.invalid","mode":"DOM_SIMULATION","selector":"#submit"}`))
-		req.Header.Set("X-EAAP-Mode", "dom-simulation")
-		req.Header.Set("X-EAAP-CSS-Target", "#submit")
-		recorder := httptest.NewRecorder()
-		g.handleExternalRequest(recorder, req)
-		if recorder.Code != http.StatusServiceUnavailable {
-			t.Fatalf("status=%d, want fail-closed 503", recorder.Code)
-		}
+	g := NewGateway(&Config{
+		AllowedOrigins: []string{"https://app.fixture.invalid"},
+		PromotedOperations: []PromotedOperation{{
+			ID: "fixture.publish", Version: "1", Path: "/api/post", Origin: "https://app.fixture.invalid", Method: http.MethodPost,
+			RequestSchema: map[string]RequestField{"text": {Type: JSONString, Required: true}},
+		}},
+	})
+	tests := []struct {
+		name, path, body string
+		header           bool
+		want             int
+	}{
+		{name: "caller overrides", path: "/api/post", body: `{"text":"safe","origin":"https://attacker.invalid","mode":"DOM_SIMULATION","selector":"#submit"}`, want: http.StatusBadRequest},
+		{name: "query override", path: "/api/post?origin=https://attacker.invalid", body: `{"text":"safe"}`, want: http.StatusBadRequest},
+		{name: "override header", path: "/api/post", body: `{"text":"safe"}`, header: true, want: http.StatusBadRequest},
+		{name: "valid typed request remains gated", path: "/api/post", body: `{"text":"fixture"}`, want: http.StatusServiceUnavailable},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			if tc.header {
+				req.Header.Set("X-EAAP-Mode", "dom-simulation")
+			}
+			recorder := httptest.NewRecorder()
+			g.handleExternalRequest(recorder, req)
+			if recorder.Code != tc.want {
+				t.Fatalf("status=%d, want %d", recorder.Code, tc.want)
+			}
+		})
+	}
+}
+
+func TestTypedRequestRejectsUnknownWrongAndNestedFields(t *testing.T) {
+	schema := map[string]RequestField{
+		"text":     {Type: JSONString, Required: true},
+		"metadata": {Type: JSONObject, Properties: map[string]RequestField{"role": {Type: JSONString, Required: true}}},
+	}
+	for _, tc := range []struct{ name, body string }{
+		{name: "unknown field", body: `{"text":"ok","mode":"DOM_SIMULATION"}`},
+		{name: "wrong scalar type", body: `{"text":42}`},
+		{name: "missing required field", body: `{"metadata":{"role":"fixture"}}`},
+		{name: "unknown nested field", body: `{"text":"ok","metadata":{"role":"fixture","selector":"#submit"}}`},
+		{name: "trailing JSON", body: `{"text":"ok"} {}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := decodeTypedRequest([]byte(tc.body), schema); err == nil {
+				t.Fatal("invalid request was accepted")
+			}
+		})
+	}
+	if _, err := decodeTypedRequest([]byte(`{"text":"ok","metadata":{"role":"fixture"}}`), schema); err != nil {
+		t.Fatalf("valid strict request rejected: %v", err)
 	}
 }
