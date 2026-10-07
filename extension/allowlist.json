@@ -1,4 +1,6 @@
 {
-  "gateway_ws_url": "ws://localhost:8080/internal/extension",
-  "allowed_origins": ["https://app.internal.example.com"]
+  "gateway_ws_url": "ws://127.0.0.1:18131/internal/extension",
+  "discovery_url": "http://127.0.0.1:18131/internal/discovery",
+  "allowed_origins": ["http://127.0.0.1:18132"],
+  "flush_interval_ms": 1000
 }

@@ -1,8 +1,10 @@
 import allowlist from './allowlist.json' with { type: 'json' };
 import { normalizeURL } from './normalize.js';
-import { redactHeaders } from './redact.js';
+import { bodyShape, headerShape, isApproved } from './capture.js';
 
 const WS_URL = allowlist.gateway_ws_url;
+const ALLOWED_ORIGINS = new Set(allowlist.allowed_origins || []);
+const CAPTURE_FILTER = { urls: [...ALLOWED_ORIGINS].map((origin) => `${origin}/*`) };
 
 let ws = null;
 let reconnectTimer = null;
@@ -15,13 +17,13 @@ const MAX_BUFFER = 200;
 
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
-    if (details.type !== 'xmlhttprequest' && details.type !== 'fetch') return;
+    if ((details.type !== 'xmlhttprequest' && details.type !== 'fetch') || !isApproved(details, ALLOWED_ORIGINS)) return;
+    const parsed = new URL(details.url);
     const sample = {
       method: details.method,
-      url_template: null,
-      host: new URL(details.url).origin,
-      request_body: details.requestBody
-        ? decompressBody(details.requestBody) : '',
+      url_template: `${parsed.pathname}${parsed.search ? '?<query-schema>' : ''}`,
+      host: parsed.origin,
+      request_body: bodyShape(details.requestBody),
       request_headers: {},
       response_body: '',
       is_static_asset: false,
@@ -30,47 +32,39 @@ chrome.webRequest.onBeforeRequest.addListener(
     };
     pendingSamples.set(details.requestId, sample);
   },
-  { urls: ['<all_urls>'] },
+  CAPTURE_FILTER,
   ['requestBody']
 );
 
 chrome.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
     const sample = pendingSamples.get(details.requestId);
-    if (!sample) return;
-    sample.request_headers = redactHeaders(details.requestHeaders || []);
+    if (!sample || !isApproved(details, ALLOWED_ORIGINS)) { pendingSamples.delete(details.requestId); return; }
+    sample.request_headers = headerShape(details.requestHeaders || []);
   },
-  { urls: ['<all_urls>'] },
-  ['requestHeaders', 'extraHeaders']
+  CAPTURE_FILTER,
+  []
 );
 
 chrome.webRequest.onCompleted.addListener(
   (details) => {
     const sample = pendingSamples.get(details.requestId);
-    if (!sample) return;
+    if (!sample || !isApproved(details, ALLOWED_ORIGINS)) { pendingSamples.delete(details.requestId); return; }
     pendingSamples.delete(details.requestId);
     sample.status_code = details.statusCode;
-    sample.response_headers = redactHeaders(details.responseHeaders || []);
+    sample.response_headers = headerShape(details.responseHeaders || []);
     // normalize URL into template
-    const [template, params] = normalizeURL(details.url, sample.host);
+    const [template] = normalizeURL(details.url, sample.host);
     sample.template = template;
     sample.url_template = template;
-    sample.param_values = Object.fromEntries(params.map((value, i) => ['param' + (i + 1), value]));
+    sample.param_values = {};
     sample.response_body = '';
     sampleBuffer.push(sample);
     if (sampleBuffer.length > MAX_BUFFER) sampleBuffer.shift();
   },
-  { urls: ['<all_urls>'] },
-  ['responseHeaders']
+  CAPTURE_FILTER,
+  []
 );
-
-function decompressBody(rb) {
-  if (rb.raw && rb.raw[0]) {
-    const bytes = new Uint8Array(rb.raw[0].bytes);
-    return new TextDecoder().decode(bytes).slice(0, 4096);
-  }
-  return '';
-}
 
 // ---------- Periodic discovery flush ----------
 
@@ -78,7 +72,7 @@ setInterval(async () => {
   if (sampleBuffer.length === 0) return;
   const batch = sampleBuffer.splice(0, sampleBuffer.length);
   try {
-    await fetch('http://localhost:8080/internal/discovery', {
+    await fetch(allowlist.discovery_url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ samples: batch }),
@@ -87,7 +81,7 @@ setInterval(async () => {
     // reconnect later; re-buffer on failure
     sampleBuffer.push(...batch);
   }
-}, 30000);
+}, allowlist.flush_interval_ms || 30000);
 
 // ---------- Phase 2: WebSocket + execution ----------
 

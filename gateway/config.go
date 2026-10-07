@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 )
 
 // Config implements RFC Section 6 requirements: rate limiting jitter,
@@ -21,16 +22,18 @@ type Config struct {
 	ExtensionWSOrigin  string              `json:"extension_ws_origin"`
 	PairingCredentials []PairingCredential `json:"pairing_credentials"`
 	PromotedOperations []PromotedOperation `json:"promoted_operations"`
+	PairingStateRoot   string              `json:"pairing_state_root"`
 }
 
 type PairingCredential struct {
-	TokenEnv     string `json:"token_env"`
-	Token        string `json:"-"`
-	TenantID     string `json:"tenant_id"`
-	AccountID    string `json:"account_id"`
-	Provider     string `json:"provider"`
-	ConnectionID string `json:"connection_id"`
-	Generation   uint64 `json:"generation"`
+	TokenEnv     string    `json:"token_env"`
+	Token        string    `json:"-"`
+	TenantID     string    `json:"tenant_id"`
+	AccountID    string    `json:"account_id"`
+	Provider     string    `json:"provider"`
+	ConnectionID string    `json:"connection_id"`
+	Generation   uint64    `json:"generation"`
+	ExpiresAt    time.Time `json:"expires_at"`
 }
 
 func DefaultConfig() *Config {
@@ -64,6 +67,9 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, fmt.Errorf("pairing credential %d has no token_env", i)
 		}
 		cfg.PairingCredentials[i].Token = os.Getenv(name)
+	}
+	if cfg.PairingStateRoot == "" {
+		return nil, fmt.Errorf("pairing_state_root must be owner configured")
 	}
 	if err := validateGatewayConfig(cfg); err != nil {
 		return nil, err

@@ -2,8 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -33,13 +32,14 @@ type bridgeSession struct {
 type ExtensionBridge struct {
 	mu          sync.RWMutex
 	sessions    map[sessionKey]*bridgeSession
-	generations map[sessionKey]uint64
-	usedTokens  map[string]bool
 	credentials []PairingCredential
+	store       *pairingStore
+	storeErr    error
 }
 
-func NewExtensionBridge(credentials []PairingCredential) *ExtensionBridge {
-	return &ExtensionBridge{sessions: make(map[sessionKey]*bridgeSession), generations: make(map[sessionKey]uint64), usedTokens: make(map[string]bool), credentials: credentials}
+func NewExtensionBridge(credentials []PairingCredential, stateRoot string) *ExtensionBridge {
+	store, err := newPairingStore(stateRoot)
+	return &ExtensionBridge{sessions: make(map[sessionKey]*bridgeSession), credentials: credentials, store: store, storeErr: err}
 }
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") != "" }}
@@ -65,36 +65,29 @@ func (eb *ExtensionBridge) HandleExtension(w http.ResponseWriter, r *http.Reques
 		_ = conn.Close()
 		return
 	}
-	digest := sha256.Sum256([]byte(hello.Token))
-	tokenID := hex.EncodeToString(digest[:])
-	eb.mu.Lock()
-	if eb.usedTokens[tokenID] {
-		eb.mu.Unlock()
+	if eb.storeErr != nil {
 		_ = conn.Close()
 		return
 	}
 	var credential *PairingCredential
 	for i := range eb.credentials {
-		if eb.credentials[i].Token != "" && hello.Token == eb.credentials[i].Token {
+		if eb.credentials[i].Token != "" && len(hello.Token) == len(eb.credentials[i].Token) && subtle.ConstantTimeCompare([]byte(hello.Token), []byte(eb.credentials[i].Token)) == 1 {
 			credential = &eb.credentials[i]
 			break
 		}
 	}
 	if credential == nil || credential.Generation == 0 || credential.TenantID == "" || credential.AccountID == "" || credential.Provider == "" || credential.ConnectionID == "" {
-		eb.mu.Unlock()
+		_ = conn.Close()
+		return
+	}
+	if err := eb.store.consume(hello.Token, *credential); err != nil {
 		_ = conn.Close()
 		return
 	}
 	key := sessionKey{credential.TenantID, credential.AccountID, credential.Provider}
-	if credential.Generation <= eb.generations[key] {
-		eb.mu.Unlock()
-		_ = conn.Close()
-		return
-	}
 	identity := SessionIdentity{credential.TenantID, credential.AccountID, credential.Provider, credential.ConnectionID, credential.Generation}
 	session := &bridgeSession{conn: conn, identity: identity}
-	eb.usedTokens[tokenID] = true
-	eb.generations[key] = credential.Generation
+	eb.mu.Lock()
 	if old := eb.sessions[key]; old != nil {
 		_ = old.conn.Close()
 	}

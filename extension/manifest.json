@@ -10,7 +10,9 @@
     "cookies"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "https://app.internal.example.com/*",
+    "http://127.0.0.1:18131/*",
+    "http://127.0.0.1:18132/*"
   ],
   "background": {
     "service_worker": "background.js",

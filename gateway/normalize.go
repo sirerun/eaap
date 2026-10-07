@@ -23,7 +23,7 @@ var (
 func NormalizeURL(rawURL string) (template string, params []string) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return rawURL, nil
+		return "", nil
 	}
 	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
 	var out []string
@@ -32,7 +32,7 @@ func NormalizeURL(rawURL string) (template string, params []string) {
 		if s == "" {
 			continue
 		}
-		if isDynamicSeg(s) {
+		if isDynamicSeg(s) || !safeStaticSegment(s) {
 			n++
 			p := "param" + itoa(n)
 			out = append(out, "{"+p+"}")
@@ -41,18 +41,15 @@ func NormalizeURL(rawURL string) (template string, params []string) {
 			out = append(out, s)
 		}
 	}
-	// Strip volatile query params (timestamps, nonces)
-	q := u.Query()
-	for k := range q {
-		if isVolatileParam(k) {
-			q.Del(k)
-		}
-	}
 	t := "/" + strings.Join(out, "/")
-	if enc := q.Encode(); enc != "" {
-		t += "?" + enc
+	if u.RawQuery != "" {
+		t += "?<query-schema>"
 	}
 	return t, params
+}
+
+func safeStaticSegment(s string) bool {
+	return regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`).MatchString(s) && !regexp.MustCompile(`(?i)(token|auth|secret|session|credential|key)`).MatchString(s)
 }
 
 func isDynamicSeg(s string) bool {

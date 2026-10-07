@@ -114,8 +114,8 @@ func TestDiscoveryCreatesSanifuCandidateAfterSanitizing(t *testing.T) {
 			t.Errorf("LLM prompt contains filtered or sensitive value %q", forbidden)
 		}
 	}
-	if !strings.Contains(prompt, "[REDACTED]") || !strings.Contains(prompt, "[REDACTED_EMAIL]") {
-		t.Errorf("LLM prompt is missing expected redactions: %s", prompt)
+	if !strings.Contains(prompt, "sensitive-field") || !strings.Contains(prompt, "string") {
+		t.Errorf("LLM prompt is missing value-free discovery shape: %s", prompt)
 	}
 
 	// Discovery candidates are not executable operations.
@@ -124,6 +124,25 @@ func TestDiscoveryCreatesSanifuCandidateAfterSanitizing(t *testing.T) {
 	gateway.handleExternalRequest(apiRecorder, apiRequest)
 	if apiRecorder.Code != http.StatusNotFound || !strings.Contains(apiRecorder.Body.String(), "no promoted operation") {
 		t.Errorf("candidate became executable: status=%d body=%q", apiRecorder.Code, apiRecorder.Body.String())
+	}
+}
+
+func TestDiscoveryMetadataNeverContainsInputValues(t *testing.T) {
+	if got := normalizeRequestPath("/api/users/BearerSecretValue?token=query-private"); got != "/api/users/{param1}?<query-schema>" {
+		t.Fatalf("unsafe discovery path template: %q", got)
+	}
+	input := `{"email":"person@example.invalid","note":"raw-private","items":[{"text":"nested-private"}]}`
+	shape := discoveryBodyShape(input)
+	for _, secret := range []string{"person@example.invalid", "raw-private", "nested-private"} {
+		if strings.Contains(shape, secret) {
+			t.Fatalf("body metadata contains value %q: %s", secret, shape)
+		}
+	}
+	if !strings.Contains(shape, "sensitive-field") || !strings.Contains(shape, "array") {
+		t.Fatalf("body shape lost useful type discovery: %s", shape)
+	}
+	if got := discoveryHeaderShape(map[string]string{"Authorization": "Bearer header-secret", "Content-Type": "application/json; boundary=header-secret"}); len(got) != 1 || got["content-type"] != "application/json" {
+		t.Fatalf("unsafe header metadata: %#v", got)
 	}
 }
 
