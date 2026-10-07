@@ -136,3 +136,37 @@ test('discovery splits aggregate UTF-8 bytes and retries an owned batch without 
   for(const [key,value] of Object.entries(prior)){if(value===undefined)delete globalThis[key];else globalThis[key]=value}
  }
 });
+
+test('in-flight and stalled capture never buffers a raw URL path', async () => {
+ const prior={chrome:globalThis.chrome,WebSocket:globalThis.WebSocket,fetch:globalThis.fetch,setInterval:globalThis.setInterval};
+ const originalSet=PendingSamples.prototype.set, originalNow=Date.now;
+ let pending, now=1000, flush; const listeners={}, requests=[];
+ const event=name=>({addListener:fn=>{listeners[name]=fn}});
+ PendingSamples.prototype.set=function(key,sample){pending=this;return originalSet.call(this,key,sample)};
+ Date.now=()=>now;
+ globalThis.chrome={webRequest:{onBeforeRequest:event('start'),onBeforeSendHeaders:event('headers'),onCompleted:event('done'),onErrorOccurred:event('error')}};
+ globalThis.WebSocket=class {static OPEN=1;readyState=0;close(){}};
+ globalThis.fetch=async(_url,options)=>{requests.push(options.body);return {ok:true}};
+ globalThis.setInterval=fn=>{flush=fn;return 1};
+ try {
+  await import('./background.js?pending-path-regression');
+  for(const [index,path] of ['/api/users/alice@example.com','/api/users/alice','/api/users/123456','/api/users/alice%40example.com'].entries()){
+   const request={url:'http://127.0.0.1:18132'+path+'?token=private-query',initiator:'http://127.0.0.1:18132',method:'GET',type:'xmlhttprequest',requestId:String(index)};
+   listeners.start(request);
+   const sample=pending.get(request.requestId);
+   assert.ok(sample);
+   assert.equal(sample.url_template,'','path must be deferred until completion');
+   assert.equal(JSON.stringify(sample).includes('alice'),false);
+   assert.equal(JSON.stringify(sample).includes('private-query'),false);
+  }
+  now+=29999;
+  assert.equal(pending.size,4);
+  for(let i=0;i<4;i++)assert.equal(pending.get(String(i)).url_template,'');
+  await flush(); assert.equal(requests.length,0);
+  now++;
+  await flush(); assert.equal(pending.size,0); assert.equal(requests.length,0);
+ } finally {
+  PendingSamples.prototype.set=originalSet; Date.now=originalNow;
+  for(const [key,value] of Object.entries(prior)){if(value===undefined)delete globalThis[key];else globalThis[key]=value}
+ }
+});
