@@ -57,16 +57,6 @@ func isDynamicSeg(s string) bool {
 		hashSeg.MatchString(s) || opaqueID.MatchString(s)
 }
 
-var volatileParams = map[string]bool{
-	"ts": true, "timestamp": true, "_": true, "nonce": true,
-	"cache_bust": true, "cb": true, "sid": true, "request_id": true,
-}
-
-func isVolatileParam(k string) bool {
-	k = strings.ToLower(k)
-	return volatileParams[k]
-}
-
 func normalizePath(path string) string {
 	template, _ := NormalizeURL(path)
 	return template

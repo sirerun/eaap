@@ -34,8 +34,8 @@ async function session(index){
    if(!worker)throw Error(`EAAP worker missing (extension ${loaded.id}): ${stderr.slice(-2500)}`);
    const {sessionId}=await send('Target.attachToTarget',{targetId:worker.targetId,flatten:true});
    await send('Runtime.enable',{},sessionId);
-   const info=await send('Runtime.evaluate',{expression:'({id:chrome.runtime.id,manifest:chrome.runtime.getManifest().name,permissions:chrome.runtime.getManifest().permissions,webRequest:!!chrome.webRequest,beforeRequest:chrome.webRequest.onBeforeRequest.hasListeners(),beforeHeaders:chrome.webRequest.onBeforeSendHeaders.hasListeners(),completed:chrome.webRequest.onCompleted.hasListeners()})',returnByValue:true,awaitPromise:true},sessionId);
-   if(info.result?.value?.id!==loaded.id || !info.result.value.beforeRequest || !info.result.value.beforeHeaders || !info.result.value.completed)throw Error(`unexpected worker ${JSON.stringify(info)}`);
+   const info=await send('Runtime.evaluate',{expression:'({id:chrome.runtime.id,manifest:chrome.runtime.getManifest().name,permissions:chrome.runtime.getManifest().permissions,webRequest:!!chrome.webRequest,beforeRequest:chrome.webRequest.onBeforeRequest.hasListeners(),beforeHeaders:chrome.webRequest.onBeforeSendHeaders.hasListeners(),completed:chrome.webRequest.onCompleted.hasListeners(),errors:chrome.webRequest.onErrorOccurred.hasListeners()})',returnByValue:true,awaitPromise:true},sessionId);
+   if(info.result?.value?.id!==loaded.id || !info.result.value.beforeRequest || !info.result.value.beforeHeaders || !info.result.value.completed || !info.result.value.errors)throw Error(`unexpected worker ${JSON.stringify(info)}`);
    const page=await send('Target.createTarget',{url:'about:blank'});
    const attached=await send('Target.attachToTarget',{targetId:page.targetId,flatten:true});
    await send('Network.enable',{},attached.sessionId);
@@ -46,7 +46,8 @@ async function session(index){
    const captureDeadline=Date.now()+10000;
    while(samples.length===sampleStart && Date.now()<captureDeadline) await new Promise(r=>setTimeout(r,100));
    const captured=samples.slice(sampleStart).flatMap(body=>JSON.parse(body).samples);
-   if(!captured.some(sample=>sample.method==='POST' && sample.template==='/api/opaque?<query-schema>')) throw Error(`profile ${index} did not capture owned POST: ${JSON.stringify(captured)}`);
+   const post=captured.find(sample=>sample.method==='POST' && sample.template==='/api/opaque?<query-schema>');
+   if(!post || JSON.parse(post.request_body || '{}').note!=='string' || post.request_headers.authorization!=='present' || post.request_headers['content-type']!=='application/json') throw Error(`profile ${index} did not capture sanitized body and header metadata: ${JSON.stringify(captured)}`);
    const opened=await send('Runtime.evaluate',{expression:'({url:location.href,state:document.readyState,body:document.body?.textContent})',returnByValue:true},attached.sessionId);
    if(opened.result?.value?.state!=='complete')throw Error(`profile ${index} page incomplete`);
    await send('Browser.close');return {index,capturedSamples:captured.length,id:loaded.id,worker:worker.url,tab:opened.result?.value,manifest:info.result.value,workerEvents:workerEvents.map(e=>({method:e.method,detail:e.params?.exceptionDetails?.text||e.params?.args?.map(a=>a.value||a.description).join(' ')})),stderr:stderr.slice(-2500)};
