@@ -1,19 +1,19 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { isDynamicSeg, normalizeURL } from './normalize.js';
+import { normalizeURL } from './normalize.js';
 import { redactHeaders } from './redact.js';
 import { bodyShape, headerShape, isApproved, PendingSamples } from './capture.js';
 
-test('recognizes numeric and UUID path identifiers', () => {
-  assert.equal(isDynamicSeg('12345'), true);
-  assert.equal(isDynamicSeg('550e8400-e29b-41d4-a716-446655440000'), true);
-  assert.equal(isDynamicSeg('orders'), false);
-});
-
-test('normalizes path identifiers and never retains query values', () => {
-  const [template, params] = normalizeURL('https://sanifu.run/api/users/12345?ts=1&include=profile');
-  assert.equal(template, '/api/users/{param1}?<query-schema>');
-  assert.deepEqual(params, []);
+test('normalization retains only explicitly configured route literals', () => {
+ const raw='https://approved.example/api/users/alice?token=private';
+ assert.deepEqual(normalizeURL(raw),['/{param1}/{param2}/{param3}?<query-schema>',[]]);
+ assert.deepEqual(normalizeURL(raw,['/api/users/{identifier}']),['/api/users/{param1}?<query-schema>',[]]);
+ assert.deepEqual(normalizeURL(raw,['/api/orders/{identifier}']),normalizeURL(raw));
+ for(const bad of [null,'/api/users/alice',{},['/api//users/{id}'],['/api/users/{bad-name}'],['/api/users/{id}/']]){
+  assert.equal(JSON.stringify(normalizeURL(raw,bad)).includes('alice'),false);
+ }
+ assert.deepEqual(normalizeURL('not-a-url'),['',[]]);
+ assert.equal(normalizeURL('https://approved.example/'+Array(65).fill('alice').join('/'))[0],'/{path}');
 });
 
 test('redacts credentials from captured request and response headers', () => {
@@ -167,6 +167,28 @@ test('in-flight and stalled capture never buffers a raw URL path', async () => {
   await flush(); assert.equal(pending.size,0); assert.equal(requests.length,0);
  } finally {
   PendingSamples.prototype.set=originalSet; Date.now=originalNow;
+  for(const [key,value] of Object.entries(prior)){if(value===undefined)delete globalThis[key];else globalThis[key]=value}
+ }
+});
+
+test('completed captures never transmit ordinary-name path identifiers', async () => {
+ const prior={chrome:globalThis.chrome,WebSocket:globalThis.WebSocket,fetch:globalThis.fetch,setInterval:globalThis.setInterval};
+ const listeners={},requests=[];let flush;
+ const event=name=>({addListener:fn=>{listeners[name]=fn}});
+ globalThis.chrome={webRequest:{onBeforeRequest:event('start'),onBeforeSendHeaders:event('headers'),onCompleted:event('done'),onErrorOccurred:event('error')}};
+ globalThis.WebSocket=class {static OPEN=1;readyState=0;close(){}};
+ globalThis.fetch=async(_url,options)=>{requests.push(options.body);return {ok:true}};
+ globalThis.setInterval=fn=>{flush=fn;return 1};
+ try {
+  await import('./background.js?completed-path-regression');
+  for(const [index,name] of ['alice','private-customer','secret%40example.com'].entries()){
+   const request={url:'http://127.0.0.1:18132/api/users/'+name,initiator:'http://127.0.0.1:18132',method:'GET',type:'xmlhttprequest',requestId:String(index)};
+   listeners.start(request);listeners.done({...request,statusCode:200});
+  }
+  await flush();
+  assert.equal(requests.length,1);assert.equal(JSON.parse(requests[0]).samples.length,3);
+  for(const marker of ['alice','private-customer','secret%40example.com'])assert.equal(requests[0].includes(marker),false,marker+' leaked');
+ } finally {
   for(const [key,value] of Object.entries(prior)){if(value===undefined)delete globalThis[key];else globalThis[key]=value}
  }
 });
