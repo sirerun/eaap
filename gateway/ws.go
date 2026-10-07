@@ -34,6 +34,7 @@ type ExtensionBridge struct {
 	sessions    map[sessionKey]*bridgeSession
 	credentials []PairingCredential
 	store       *pairingStore
+	pairingHook func(string, uint64) // test-only scheduling hook; nil in production
 	storeErr    error
 }
 
@@ -80,14 +81,23 @@ func (eb *ExtensionBridge) HandleExtension(w http.ResponseWriter, r *http.Reques
 		_ = conn.Close()
 		return
 	}
+	if eb.pairingHook != nil {
+		eb.pairingHook("before-consume", credential.Generation)
+	}
+	// One lock orders durable consumption and active installation, including
+	// the case where a newer session disconnects before an older handler resumes.
+	eb.mu.Lock()
 	if err := eb.store.consume(hello.Token, *credential); err != nil {
+		eb.mu.Unlock()
 		_ = conn.Close()
 		return
+	}
+	if eb.pairingHook != nil {
+		eb.pairingHook("after-consume", credential.Generation)
 	}
 	key := sessionKey{credential.TenantID, credential.AccountID, credential.Provider}
 	identity := SessionIdentity{credential.TenantID, credential.AccountID, credential.Provider, credential.ConnectionID, credential.Generation}
 	session := &bridgeSession{conn: conn, identity: identity}
-	eb.mu.Lock()
 	if old := eb.sessions[key]; old != nil {
 		_ = old.conn.Close()
 	}

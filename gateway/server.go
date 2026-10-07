@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -159,14 +157,6 @@ func (g *Gateway) Run() error {
 		_, _ = w.Write([]byte("ok"))
 	})
 	return http.ListenAndServe(g.cfg.ListenAddr, mux)
-}
-
-func newID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
-	}
-	return hex.EncodeToString(b)
 }
 
 type DiscoveryBatch struct {

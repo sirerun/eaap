@@ -82,7 +82,9 @@ func (c *LLMClient) InferSpec(ctx context.Context, samples []TrafficSample) (map
 	if err != nil {
 		return nil, fmt.Errorf("LLM request: %w", err)
 	}
-	defer response.Body.Close()
+	// The request result is decided by the status/body; closing an already
+	// consumed response cannot authorize a retry or alter inferred metadata.
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(io.LimitReader(response.Body, 512))
 		return nil, fmt.Errorf("LLM status %d: %s", response.StatusCode, raw)

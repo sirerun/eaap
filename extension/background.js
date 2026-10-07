@@ -1,6 +1,6 @@
 import allowlist from './allowlist.json' with { type: 'json' };
 import { normalizeURL } from './normalize.js';
-import { bodyShape, headerShape, isApproved } from './capture.js';
+import { bodyShape, headerShape, isApproved, PendingSamples } from './capture.js';
 
 const WS_URL = allowlist.gateway_ws_url;
 const ALLOWED_ORIGINS = new Set(allowlist.allowed_origins || []);
@@ -12,8 +12,9 @@ let reconnectTimer = null;
 // ---------- Phase 1: Traffic capture ----------
 
 const sampleBuffer = [];
-const pendingSamples = new Map();
+const pendingSamples = new PendingSamples();
 const MAX_BUFFER = 200;
+let flushInFlight = false;
 
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
@@ -43,7 +44,7 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     sample.request_headers = headerShape(details.requestHeaders || []);
   },
   CAPTURE_FILTER,
-  []
+  ['requestHeaders']
 );
 
 chrome.webRequest.onCompleted.addListener(
@@ -63,23 +64,35 @@ chrome.webRequest.onCompleted.addListener(
     if (sampleBuffer.length > MAX_BUFFER) sampleBuffer.shift();
   },
   CAPTURE_FILTER,
-  []
+  ['responseHeaders']
+);
+
+chrome.webRequest.onErrorOccurred.addListener(
+  (details) => { pendingSamples.delete(details.requestId); },
+  CAPTURE_FILTER
 );
 
 // ---------- Periodic discovery flush ----------
 
 setInterval(async () => {
-  if (sampleBuffer.length === 0) return;
+  pendingSamples.prune();
+  if (sampleBuffer.length === 0 || flushInFlight) return;
+  flushInFlight = true;
   const batch = sampleBuffer.splice(0, sampleBuffer.length);
   try {
-    await fetch(allowlist.discovery_url, {
+    const response = await fetch(allowlist.discovery_url, {
       method: 'POST',
+      signal: AbortSignal.timeout(5000),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ samples: batch }),
     });
+    if (!response.ok) throw new Error('discovery refused batch');
   } catch (e) {
     // reconnect later; re-buffer on failure
     sampleBuffer.push(...batch);
+    if (sampleBuffer.length > MAX_BUFFER) sampleBuffer.splice(0, sampleBuffer.length - MAX_BUFFER);
+  } finally {
+    flushInFlight = false;
   }
 }, allowlist.flush_interval_ms || 30000);
 

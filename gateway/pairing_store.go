@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,7 +39,7 @@ func newPairingStore(root string) (*pairingStore, error) {
 	}
 	return &pairingStore{root: root}, nil
 }
-func (s *pairingStore) consume(token string, c PairingCredential) error {
+func (s *pairingStore) consume(token string, c PairingCredential) (retErr error) {
 	digest := sha256.Sum256([]byte(token))
 	id := hex.EncodeToString(digest[:])
 	lockPath := filepath.Join(s.root, "pairing.lock")
@@ -53,11 +54,11 @@ func (s *pairingStore) consume(token string, c PairingCredential) error {
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer func() { retErr = errors.Join(retErr, lock.Close()) }()
 	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
 		return err
 	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	defer func() { retErr = errors.Join(retErr, syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)) }()
 	path := filepath.Join(s.root, "pairing.json")
 	if info, e := os.Lstat(path); e == nil {
 		if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
@@ -96,7 +97,11 @@ func (s *pairingStore) consume(token string, c PairingCredential) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() {
+		if e := os.Remove(tmpName); e != nil && !os.IsNotExist(e) {
+			retErr = errors.Join(retErr, e)
+		}
+	}()
 	if err = tmp.Chmod(0600); err == nil {
 		_, err = tmp.Write(raw)
 	}
@@ -117,6 +122,6 @@ func (s *pairingStore) consume(token string, c PairingCredential) error {
 	if err != nil {
 		return err
 	}
-	defer dir.Close()
+	defer func() { retErr = errors.Join(retErr, dir.Close()) }()
 	return dir.Sync()
 }

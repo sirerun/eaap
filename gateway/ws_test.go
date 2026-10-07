@@ -35,12 +35,12 @@ func TestPairingIsIdentityScopedSingleUseAndGenerationFenced(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first pairing: %v", err)
 	}
-	defer first.Close()
+	defer func() { _ = first.Close() }()
 	second, err := connect("fixture-two", "chrome-extension://fixture")
 	if err != nil {
 		t.Fatalf("second pairing: %v", err)
 	}
-	defer second.Close()
+	defer func() { _ = second.Close() }()
 	waitForSessions(t, bridge, 2)
 
 	if rejected := pairingRejected(connect, "fixture-one", "chrome-extension://fixture"); !rejected {
@@ -76,7 +76,7 @@ func pairingRejected(connect func(string, string) (*websocket.Conn, error), toke
 	if err != nil {
 		return true
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
 	_, _, err = conn.ReadMessage()
 	return err != nil
@@ -156,5 +156,83 @@ func TestTypedRequestRejectsUnknownWrongAndNestedFields(t *testing.T) {
 	}
 	if _, err := decodeTypedRequest([]byte(`{"text":"ok","metadata":{"role":"fixture"}}`), schema); err != nil {
 		t.Fatalf("valid strict request rejected: %v", err)
+	}
+}
+
+func TestPairingConsumptionAndInstallationAreOrdered(t *testing.T) {
+	bridge := NewExtensionBridge([]PairingCredential{
+		{Token: "old-token", TenantID: "tenant", AccountID: "account", Provider: "fixture", ConnectionID: "old", Generation: 8, ExpiresAt: time.Now().Add(time.Hour)},
+		{Token: "new-token", TenantID: "tenant", AccountID: "account", Provider: "fixture", ConnectionID: "new", Generation: 9, ExpiresAt: time.Now().Add(time.Hour)},
+	}, filepath.Join(t.TempDir(), "state"))
+	oldConsumed, newAttempt, releaseOld := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	bridge.pairingHook = func(stage string, generation uint64) {
+		if stage == "after-consume" && generation == 8 {
+			close(oldConsumed)
+			<-releaseOld
+		}
+		if stage == "before-consume" && generation == 9 {
+			close(newAttempt)
+		}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bridge.HandleExtension(w, r, "chrome-extension://fixture")
+	}))
+	defer server.Close()
+	defer func() {
+		select {
+		case <-releaseOld:
+		default:
+			close(releaseOld)
+		}
+	}()
+	connect := func(token string) *websocket.Conn {
+		conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), http.Header{"Origin": []string{"chrome-extension://fixture"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = conn.WriteJSON(pairingHello{Token: token}); err != nil {
+			t.Fatal(err)
+		}
+		return conn
+	}
+	old := connect("old-token")
+	defer func() { _ = old.Close() }()
+	select {
+	case <-oldConsumed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old pairing did not consume")
+	}
+	newer := connect("new-token")
+	defer func() { _ = newer.Close() }()
+	newAcknowledged := make(chan error, 1)
+	go func() { _, _, err := newer.ReadMessage(); newAcknowledged <- err }()
+	select {
+	case <-newAttempt:
+	case <-time.After(2 * time.Second):
+		close(releaseOld)
+		t.Fatal("new pairing did not attempt")
+	}
+	// Holding the earlier consume/install section must prevent the newer one
+	// from acknowledging before the earlier section has completed.
+	select {
+	case err := <-newAcknowledged:
+		close(releaseOld)
+		t.Fatalf("new pairing bypassed paused consume/install section: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseOld)
+	select {
+	case err := <-newAcknowledged:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("new pairing not acknowledged")
+	}
+	bridge.mu.RLock()
+	current := bridge.sessions[sessionKey{"tenant", "account", "fixture"}]
+	bridge.mu.RUnlock()
+	if current == nil || current.identity.Generation != 9 {
+		t.Fatalf("newest generation not retained: %+v", current)
 	}
 }
