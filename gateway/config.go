@@ -2,22 +2,34 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 )
 
 // Config implements RFC Section 6 requirements: rate limiting jitter,
 // sanitization, and allowlist enforcement.
 type Config struct {
-	ListenAddr        string   `json:"listen_addr"`
-	LLMAPIURL         string   `json:"llm_api_url"`
-	LLMAPIKeyEnv      string   `json:"llm_api_key_env"`
-	LLMAPIKey         string   `json:"-"`
-	LLMModel          string   `json:"llm_model"`
-	AllowedOrigins    []string `json:"allowed_origins"`  // RFC 6.4 SSRF allowlist
-	JitterMinMs       int      `json:"jitter_min_ms"`    // RFC 6.2, default 2000
-	JitterMaxMs       int      `json:"jitter_max_ms"`    // RFC 6.2, default 5000
-	SanitizeHeaders   []string `json:"sanitize_headers"` // RFC 6.3
-	ExtensionWSOrigin string   `json:"extension_ws_origin"`
+	ListenAddr         string              `json:"listen_addr"`
+	LLMAPIURL          string              `json:"llm_api_url"`
+	LLMAPIKeyEnv       string              `json:"llm_api_key_env"`
+	LLMAPIKey          string              `json:"-"`
+	LLMModel           string              `json:"llm_model"`
+	AllowedOrigins     []string            `json:"allowed_origins"`  // RFC 6.4 SSRF allowlist
+	JitterMinMs        int                 `json:"jitter_min_ms"`    // RFC 6.2, default 2000
+	JitterMaxMs        int                 `json:"jitter_max_ms"`    // RFC 6.2, default 5000
+	SanitizeHeaders    []string            `json:"sanitize_headers"` // RFC 6.3
+	ExtensionWSOrigin  string              `json:"extension_ws_origin"`
+	PairingCredentials []PairingCredential `json:"pairing_credentials"`
+}
+
+type PairingCredential struct {
+	TokenEnv     string `json:"token_env"`
+	Token        string `json:"-"`
+	TenantID     string `json:"tenant_id"`
+	AccountID    string `json:"account_id"`
+	Provider     string `json:"provider"`
+	ConnectionID string `json:"connection_id"`
+	Generation   uint64 `json:"generation"`
 }
 
 func DefaultConfig() *Config {
@@ -36,15 +48,21 @@ func DefaultConfig() *Config {
 
 func LoadConfig(path string) (*Config, error) {
 	cfg := DefaultConfig()
-	if path == "" {
-		return cfg, nil
+	if path != "" {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(b, cfg); err != nil {
+			return nil, err
+		}
 	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(b, cfg); err != nil {
-		return nil, err
+	for i := range cfg.PairingCredentials {
+		name := cfg.PairingCredentials[i].TokenEnv
+		if name == "" {
+			return nil, fmt.Errorf("pairing credential %d has no token_env", i)
+		}
+		cfg.PairingCredentials[i].Token = os.Getenv(name)
 	}
 	return cfg, nil
 }

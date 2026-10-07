@@ -62,7 +62,7 @@ func TestInferSpecAgainstFakeLLM(t *testing.T) {
 	}
 }
 
-func TestDiscoveryRegistersSanifuRouteAfterSanitizing(t *testing.T) {
+func TestDiscoveryCreatesSanifuCandidateAfterSanitizing(t *testing.T) {
 	var prompt string
 	client := newFakeLLMClientWithCapture(t, &prompt)
 	cfg := &Config{
@@ -106,11 +106,8 @@ func TestDiscoveryRegistersSanifuRouteAfterSanitizing(t *testing.T) {
 	}
 
 	key := "GET /api/users/{param1}"
-	if _, ok := gateway.specs[key]; !ok {
-		t.Fatalf("discovery did not register normalized route %q", key)
-	}
-	if got := gateway.routeOrigins[key]; got != "https://sanifu.run" {
-		t.Errorf("route origin = %q, want https://sanifu.run", got)
+	if _, ok := gateway.candidates[key]; !ok {
+		t.Fatalf("discovery did not create normalized candidate %q", key)
 	}
 	for _, forbidden := range []string{"private-token", "visitor@example.com", "must not be forwarded", "www.tiktok.com"} {
 		if strings.Contains(prompt, forbidden) {
@@ -121,13 +118,12 @@ func TestDiscoveryRegistersSanifuRouteAfterSanitizing(t *testing.T) {
 		t.Errorf("LLM prompt is missing expected redactions: %s", prompt)
 	}
 
-	// A request for the observed Sanifu route passes route and origin checks and
-	// reaches the extension bridge. No extension socket is required for this check.
+	// Discovery candidates are not executable operations.
 	apiRequest := httptest.NewRequest(http.MethodGet, "/api/users/67890", nil)
 	apiRecorder := httptest.NewRecorder()
 	gateway.handleExternalRequest(apiRecorder, apiRequest)
-	if apiRecorder.Code != http.StatusBadGateway || !strings.Contains(apiRecorder.Body.String(), "no extension session connected") {
-		t.Errorf("request did not reach extension bridge: status=%d body=%q", apiRecorder.Code, apiRecorder.Body.String())
+	if apiRecorder.Code != http.StatusServiceUnavailable || !strings.Contains(apiRecorder.Body.String(), "T4.2") {
+		t.Errorf("candidate became executable: status=%d body=%q", apiRecorder.Code, apiRecorder.Body.String())
 	}
 }
 
