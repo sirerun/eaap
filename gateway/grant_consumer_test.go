@@ -30,7 +30,7 @@ func grantTestVector(t *testing.T) (string, GrantConsumerConfig, GrantExecutionB
 	signing := enc(header) + "." + enc(payload)
 	token := signing + "." + enc(ed25519.Sign(priv, []byte(signing)))
 	cfg := GrantConsumerConfig{Issuer: "issuer-test", Audience: "eaap", TenantID: "tenant-a", Keys: []GrantPublicKey{{"test-key", pub}}}
-	binding := GrantExecutionBinding{TenantID: "tenant-a", AccountID: "account-test", SessionGeneration: 3, AdapterName: "synthetic", AdapterVersion: "1", AdapterTransport: "eaap", Operation: "publish", OperationVersion: "1", DestinationID: "destination-test", DestinationHash: strings.Repeat("a", 64), ContentHash: strings.Repeat("b", 64)}
+	binding := GrantExecutionBinding{ConnectionID: "connection-test", TenantID: "tenant-a", AccountID: "account-test", SessionGeneration: 3, AdapterName: "synthetic", AdapterVersion: "1", AdapterTransport: "eaap", Operation: "publish", OperationVersion: "1", DestinationID: "destination-test", DestinationHash: strings.Repeat("a", 64), ContentHash: strings.Repeat("b", 64)}
 	return token, cfg, binding, now
 }
 
