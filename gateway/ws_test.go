@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,10 +14,11 @@ import (
 )
 
 func TestPairingIsIdentityScopedSingleUseAndGenerationFenced(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "private-pairing-state")
 	bridge := NewExtensionBridge([]PairingCredential{
-		{Token: "fixture-one", TenantID: "tenant-a", AccountID: "account-a", Provider: "fixture", ConnectionID: "connection-a", Generation: 1},
-		{Token: "fixture-two", TenantID: "tenant-b", AccountID: "account-b", Provider: "fixture", ConnectionID: "connection-b", Generation: 3},
-	})
+		{Token: "fixture-one", TenantID: "tenant-a", AccountID: "account-a", Provider: "fixture", ConnectionID: "connection-a", Generation: 1, ExpiresAt: time.Now().Add(time.Hour)},
+		{Token: "fixture-two", TenantID: "tenant-b", AccountID: "account-b", Provider: "fixture", ConnectionID: "connection-b", Generation: 3, ExpiresAt: time.Now().Add(time.Hour)},
+	}, root)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bridge.HandleExtension(w, r, "chrome-extension://fixture")
 	}))

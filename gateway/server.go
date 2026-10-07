@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -58,7 +59,7 @@ func NewGateway(cfg *Config) *Gateway {
 	gw := &Gateway{
 		cfg:        cfg,
 		llm:        NewLLMClient(cfg),
-		bridge:     NewExtensionBridge(cfg.PairingCredentials),
+		bridge:     NewExtensionBridge(cfg.PairingCredentials, cfg.PairingStateRoot),
 		candidates: make(map[string]map[string]interface{}),
 		operations: make(map[string]PromotedOperation),
 	}
@@ -81,7 +82,7 @@ func validateGatewayConfig(cfg *Config) error {
 		seen[key] = true
 	}
 	for i, credential := range cfg.PairingCredentials {
-		if credential.Token == "" || len(credential.Token) < 32 || credential.TenantID == "" || credential.AccountID == "" || credential.Provider == "" || credential.ConnectionID == "" || credential.Generation == 0 {
+		if credential.Token == "" || len(credential.Token) < 32 || credential.TenantID == "" || credential.AccountID == "" || credential.Provider == "" || credential.ConnectionID == "" || credential.Generation == 0 || credential.ExpiresAt.IsZero() || !credential.ExpiresAt.After(time.Now()) {
 			return fmt.Errorf("invalid pairing credential %d", i)
 		}
 	}
@@ -194,9 +195,11 @@ func (g *Gateway) handleDiscoveryIngest(w http.ResponseWriter, r *http.Request) 
 		if !isAllowedOrigin(g.cfg.AllowedOrigins, s.Host) {
 			continue
 		}
-		s.RequestHead = SanitizeHeaders(s.RequestHead, g.cfg.SanitizeHeaders)
-		s.RequestBody = SanitizeBody(s.RequestBody, 4096)
-		s.ResponseBody = SanitizeBody(s.ResponseBody, 4096)
+		s.ParamValues = nil
+		s.RequestHead = discoveryHeaderShape(s.RequestHead)
+		s.RequestBody = discoveryBodyShape(s.RequestBody)
+		s.ResponseHead = nil
+		s.ResponseBody = ""
 		allowed = append(allowed, *s)
 	}
 
@@ -361,6 +364,75 @@ func validateObjectValues(values map[string]json.RawMessage, schema map[string]R
 func normalizeRequestPath(path string) string {
 	template, _ := NormalizeURL(path)
 	return template
+}
+
+func discoveryHeaderShape(headers map[string]string) map[string]string {
+	result := map[string]string{}
+	for name, value := range headers {
+		if strings.EqualFold(name, "content-type") {
+			mediaType := strings.TrimSpace(strings.Split(value, ";")[0])
+			if len(mediaType) <= 80 && regexp.MustCompile(`^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$`).MatchString(mediaType) {
+				result["content-type"] = mediaType
+			}
+		}
+	}
+	return result
+}
+
+func discoveryBodyShape(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	var value interface{}
+	if json.Unmarshal([]byte(raw), &value) != nil {
+		return `"unstructured"`
+	}
+	shape := func(v interface{}) interface{} { return bodyValueType(v) }
+	encoded, err := json.Marshal(shape(value))
+	if err != nil {
+		return `"unknown"`
+	}
+	return string(encoded)
+}
+
+func bodyValueType(value interface{}) interface{} {
+	switch v := value.(type) {
+	case map[string]interface{}:
+		out := map[string]interface{}{}
+		for key, child := range v {
+			if sensitiveDiscoveryName(key) || !regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`).MatchString(key) {
+				out["<sensitive-field>"] = bodyValueType(child)
+			} else {
+				out[key] = bodyValueType(child)
+			}
+		}
+		return out
+	case []interface{}:
+		if len(v) == 0 {
+			return "array<unknown>"
+		}
+		return "array<" + fmt.Sprint(bodyValueType(v[0])) + ">"
+	case string:
+		return "string"
+	case float64:
+		return "number"
+	case bool:
+		return "boolean"
+	case nil:
+		return "null"
+	default:
+		return "unknown"
+	}
+}
+
+func sensitiveDiscoveryName(name string) bool {
+	n := strings.ToLower(name)
+	for _, part := range []string{"password", "passwd", "token", "secret", "auth", "cookie", "credential", "api_key", "apikey", "email", "phone"} {
+		if strings.Contains(n, part) {
+			return true
+		}
+	}
+	return false
 }
 
 func isAllowedOrigin(allowed []string, candidate string) bool {
