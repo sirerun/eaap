@@ -20,7 +20,14 @@ import (
 func journalFixture(t *testing.T, root string) (*grantJournal, string, GrantConsumerConfig, GrantExecutionBinding, time.Time) {
 	t.Helper()
 	token, cfg, binding, now := grantTestVector(t)
-	j, err := NewGrantJournal(GrantJournalConfig{StateRoot: root, LockTimeout: 3 * time.Second})
+	config := GrantJournalConfig{StateRoot: root, LockTimeout: 3 * time.Second}
+	var j *grantJournal
+	var err error
+	if _, inspectErr := os.Lstat(root); os.IsNotExist(inspectErr) {
+		j, err = InitializeGrantJournal(config)
+	} else {
+		j, err = NewGrantJournal(config)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +309,7 @@ func TestGrantJournalRejectsUnsafePersistedFileModes(t *testing.T) {
 	}
 }
 
-func TestGrantJournalCanceledContextDoesNotInitialize(t *testing.T) {
+func TestGrantJournalCanceledContextDoesNotRecord(t *testing.T) {
 	root := filepath.Join(journalTempDir(t), "journal")
 	j, token, cfg, binding, now := journalFixture(t, root)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -310,8 +317,9 @@ func TestGrantJournalCanceledContextDoesNotInitialize(t *testing.T) {
 	if _, _, err := j.Observe(ctx, token, cfg, binding, now); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled observe = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "state.json")); !os.IsNotExist(err) {
-		t.Fatalf("canceled context initialized state: %v", err)
+	state, err := j.loadState()
+	if err != nil || len(state.Entries) != 0 || len(state.Nonces) != 0 {
+		t.Fatalf("canceled context changed explicitly initialized state: %+v %v", state, err)
 	}
 }
 
@@ -462,6 +470,9 @@ func TestGrantJournalSubprocessCrashPersistence(t *testing.T) {
 		os.Exit(0)
 	}
 	root := filepath.Join(journalTempDir(t), "journal")
+	if _, err := InitializeGrantJournal(GrantJournalConfig{StateRoot: root}); err != nil {
+		t.Fatal(err)
+	}
 	token, _, _, _ := grantTestVector(t)
 	var wg sync.WaitGroup
 	errs := make(chan error, 2)
