@@ -79,9 +79,67 @@ type grantJournal struct {
 	syncDir     func(string) error
 }
 
-// NewGrantJournal validates an operator-selected private absolute path. Every
-// existing path component is checked with Lstat; symlinked ancestors fail.
+// NewGrantJournal opens an existing operator-initialized journal. It never
+// creates a root or initializes absent state; loss requires explicit recovery.
 func NewGrantJournal(cfg GrantJournalConfig) (*grantJournal, error) {
+	j, err := configuredGrantJournal(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err = validateJournalRoot(j.root); err != nil {
+		return nil, err
+	}
+	err = j.withState(context.Background(), func(*grantJournalState) error { return errJournalExisting })
+	if err != nil {
+		return nil, err
+	}
+	return j, nil
+}
+
+// InitializeGrantJournal is an explicit first-enrollment operation, never an
+// ordinary startup fallback. The configured root must not exist. Failures leave
+// the owned partial root in place for operator recovery; no automatic reset.
+func InitializeGrantJournal(cfg GrantJournalConfig) (_ *grantJournal, retErr error) {
+	j, err := configuredGrantJournal(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err = validateJournalPath(j.root, true); err != nil {
+		return nil, err
+	}
+	if err = os.Mkdir(j.root, 0700); err != nil {
+		return nil, fmt.Errorf("initialize fresh grant journal root: %w", err)
+	}
+	if err = validateJournalRoot(j.root); err != nil {
+		return nil, err
+	}
+	parent, err := os.Open(filepath.Dir(j.root))
+	if err != nil {
+		return nil, err
+	}
+	if err = errors.Join(parent.Sync(), parent.Close()); err != nil {
+		return nil, err
+	}
+	lock, err := j.acquire(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	defer func() { retErr = errors.Join(retErr, syscall.Flock(int(lock.Fd()), syscall.LOCK_UN), lock.Close()) }()
+	marker := j.markerBytes(lock)
+	if len(marker) == 0 {
+		return nil, errors.New("grant journal initialization lock unavailable")
+	}
+	if err = j.writeFile(filepath.Join(j.root, "initialized"), marker); err != nil {
+		return nil, err
+	}
+	state := grantJournalState{Schema: grantJournalVersion, Entries: map[string]GrantObservation{}, Nonces: map[string]string{}}
+	if err = j.writeFile(filepath.Join(j.root, "state.json"), marshalGrantJournal(state)); err != nil {
+		return nil, err
+	}
+	return j, nil
+}
+
+func configuredGrantJournal(cfg GrantJournalConfig) (*grantJournal, error) {
 	if cfg.StateRoot == "" || !filepath.IsAbs(cfg.StateRoot) {
 		return nil, errors.New("grant journal state root must be an operator-configured absolute path")
 	}
@@ -91,17 +149,7 @@ func NewGrantJournal(cfg GrantJournalConfig) (*grantJournal, error) {
 	if cfg.LockTimeout > grantJournalMaxLockWait {
 		return nil, errors.New("grant journal lock timeout exceeds bounded maximum")
 	}
-	root := filepath.Clean(cfg.StateRoot)
-	if err := validateJournalPath(root, true); err != nil {
-		return nil, err
-	}
-	if err := os.Mkdir(root, 0700); err != nil && !os.IsExist(err) {
-		return nil, fmt.Errorf("create grant journal root: %w", err)
-	}
-	if err := validateJournalRoot(root); err != nil {
-		return nil, err
-	}
-	j := &grantJournal{root: root, lockTimeout: cfg.LockTimeout, openFile: os.OpenFile}
+	j := &grantJournal{root: filepath.Clean(cfg.StateRoot), lockTimeout: cfg.LockTimeout, openFile: os.OpenFile}
 	j.writeFile = j.atomicWrite
 	return j, nil
 }
@@ -214,9 +262,6 @@ func (j *grantJournal) Observe(ctx context.Context, compact string, cfg GrantCon
 		observation = record
 		return nil
 	}); err != nil {
-		if errors.Is(err, errJournalExisting) {
-			return observation, true, nil
-		}
 		return GrantObservation{}, false, err
 	}
 	return observation, existingAttempt, nil
@@ -266,6 +311,11 @@ func (j *grantJournal) withState(ctx context.Context, mutate func(*grantJournalS
 	if err := validateJournalRoot(j.root); err != nil {
 		return err
 	}
+	// Ordinary operations require a durable enrollment marker before any
+	// lock creation or state access. Empty/lost storage never means first use.
+	if _, err := os.Lstat(filepath.Join(j.root, "initialized")); err != nil {
+		return fmt.Errorf("grant journal is not initialized: %w", err)
+	}
 	lock, err := j.acquire(ctx)
 	if err != nil {
 		return err
@@ -275,30 +325,18 @@ func (j *grantJournal) withState(ctx context.Context, mutate func(*grantJournalS
 		return err
 	}
 	state, err := j.loadState()
-	if errors.Is(err, os.ErrNotExist) {
-		marker := filepath.Join(j.root, "initialized")
-		if _, e := os.Lstat(marker); e == nil {
-			return errors.New("grant journal established state is missing")
-		} else if !os.IsNotExist(e) {
-			return e
-		}
-		state = grantJournalState{Schema: grantJournalVersion, Entries: map[string]GrantObservation{}, Nonces: map[string]string{}}
-		if e := j.writeFile(marker, j.markerBytes(lock)); e != nil {
-			return fmt.Errorf("initialize grant journal marker: %w", e)
-		}
-		if e := j.writeFile(filepath.Join(j.root, "state.json"), marshalGrantJournal(state)); e != nil {
-			return fmt.Errorf("initialize grant journal state: %w", e)
-		}
-	} else if err != nil {
+	if err != nil {
 		return err
-	} else {
-		if e := j.validateMarker(lock); e != nil {
-			return e
-		}
 	}
+	if err = j.validateMarker(lock); err != nil {
+		return err
+	}
+
 	if err = mutate(&state); err != nil {
-		if errors.Is(err, errJournalExisting) {
-			return err
+		if err == errJournalExisting {
+			// Skip replacement for an exact replay, but still surface any
+			// deferred lock-release or descriptor-close failure.
+			return nil
 		}
 		return err
 	}

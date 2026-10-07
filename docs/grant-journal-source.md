@@ -2,7 +2,11 @@
 
 `gateway/grant_journal.go` adds a durable replay and attempt observation journal
 for the synthetic, source-only EAAP grant consumer. Operators must configure a
-private absolute `StateRoot`; construction rejects symlinked ancestors, unsafe
+private absolute StateRoot. InitializeGrantJournal explicitly enrolls a new
+root using exclusive directory creation and a parent-directory sync; it refuses
+any existing root. NewGrantJournal only opens established storage and never
+creates or initializes it. Ordinary startup must never fall back to enrollment
+when opening fails. Construction rejects symlinked ancestors, unsafe
 ancestor ownership/modes, and a root that is not owned by the effective user
 with private directory permissions. The journal uses a stable 0600 lock file,
 exclusive `flock`, cancellable acquisition, and a maximum 30 second lock wait.
@@ -37,3 +41,10 @@ preparation, effect readback, release, automatic resend, or restart recovery.
 Gateway effect routes remain 503. T4.2 remains open; journal success must never
 be interpreted as permission to perform an external effect. Tests use only the
 consumer's synthetic Ed25519 key and metadata.
+
+
+## Coordinator integration repair
+
+GJ-C1 was reproduced in grant-journal-rootloss-red.log: moving away the entire established directory let ordinary NewGrantJournal reopen create a fresh journal and accept the same signed grant as new. An empty configured directory also initialized implicitly. The explicit-enrollment/open split now denies both cases; grant-journal-rootloss-green.log passes full gateway race tests, vet and lint0, and grant-journal-integrated-node.log passes11 extension tests. Existing directory initialization is refused without changing stored history. Recovery of lost storage remains an explicit operator decision; no automatic enrollment fallback exists.
+
+Exact replays skip replacement while retaining lock-release/close errors, rather than masking those errors behind a replay sentinel. This journal remains observation evidence only; production effect admission and routes are unchanged.
