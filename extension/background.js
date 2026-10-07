@@ -24,7 +24,8 @@ chrome.webRequest.onBeforeRequest.addListener(
     const parsed = new URL(details.url);
     const sample = {
       method: details.method,
-      url_template: `${parsed.pathname}${parsed.search ? '?<query-schema>' : ''}`,
+      // Defer all path metadata until completion; pending captures keep no path values.
+      url_template: '',
       host: parsed.origin,
       request_body: bodyShape(details.requestBody),
       request_headers: {},
