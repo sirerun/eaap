@@ -30,3 +30,11 @@ independent synthetic tests repeatable. It is not a production trust anchor.
 
 No live grant, provider, deployment, or external effect was used or enabled by
 this checkpoint.
+
+## Coordinator integration evidence
+
+GC-C1 reproduced acceptance of an invalid nonce/message ID. GC-C2 and GC-C3 reproduced acceptance of changed connection and provider API version with the same trusted execution binding. Commit1fead20 applies exact ID validation and explicitly binds those fields; grant-integration-red.log/green.log retain the failures and passing gateway race checks.
+
+The optional TestExternalExecutorGrantInteroperability reads an operator-supplied synthetic fixture outside the repository. On DGX it passed against the producer fixture pinned in docs/jarmee-contract-pin.md, including exact decoded tuple comparison. No producer source or fixture bytes were vendored. grant-producer-interop.log records this real cross-implementation check at a9adeef. Full gateway race/vet/lint and all11 extension tests passed (grant-final-verify.log, grant-final-node.log). Browser code is unchanged from the independently reviewed landed registry/pairing source.
+
+Signature verification remains repeatable and conveys no execution admission. Durable nonce/attempt consumption, current fences, preparation/recovery and effects remain disabled and unqualified. Independent complete review, merge and landed verification remain pending.
