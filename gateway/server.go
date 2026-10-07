@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -26,21 +28,123 @@ type Gateway struct {
 // PromotedOperation is server-owned executable metadata. Discovery candidates
 // never enter this registry automatically; T4.2 must also gate execution.
 type PromotedOperation struct {
-	ID            string
-	Version       string
-	Origin        string
-	Method        string
-	RequestSchema map[string]interface{}
+	ID            string                  `json:"id"`
+	Version       string                  `json:"version"`
+	Path          string                  `json:"path"`
+	Origin        string                  `json:"origin"`
+	Method        string                  `json:"method"`
+	RequestSchema map[string]RequestField `json:"request_schema"`
+}
+
+type JSONValueType string
+
+const (
+	JSONString  JSONValueType = "string"
+	JSONNumber  JSONValueType = "number"
+	JSONInteger JSONValueType = "integer"
+	JSONBoolean JSONValueType = "boolean"
+	JSONObject  JSONValueType = "object"
+	JSONArray   JSONValueType = "array"
+)
+
+type RequestField struct {
+	Type       JSONValueType           `json:"type"`
+	Required   bool                    `json:"required"`
+	Properties map[string]RequestField `json:"properties,omitempty"`
+	Items      *RequestField           `json:"items,omitempty"`
 }
 
 func NewGateway(cfg *Config) *Gateway {
-	return &Gateway{
+	gw := &Gateway{
 		cfg:        cfg,
 		llm:        NewLLMClient(cfg),
 		bridge:     NewExtensionBridge(cfg.PairingCredentials),
 		candidates: make(map[string]map[string]interface{}),
 		operations: make(map[string]PromotedOperation),
 	}
+	for _, operation := range cfg.PromotedOperations {
+		gw.operations[operationKey(operation.Method, operation.Path)] = operation
+	}
+	return gw
+}
+
+func validateGatewayConfig(cfg *Config) error {
+	seen := make(map[string]bool, len(cfg.PromotedOperations))
+	for _, operation := range cfg.PromotedOperations {
+		if err := validatePromotedOperation(cfg, operation); err != nil {
+			return fmt.Errorf("invalid promoted operation %q: %w", operation.ID, err)
+		}
+		key := operationKey(operation.Method, operation.Path)
+		if seen[key] {
+			return fmt.Errorf("duplicate promoted operation route %q", key)
+		}
+		seen[key] = true
+	}
+	for i, credential := range cfg.PairingCredentials {
+		if credential.Token == "" || len(credential.Token) < 32 || credential.TenantID == "" || credential.AccountID == "" || credential.Provider == "" || credential.ConnectionID == "" || credential.Generation == 0 {
+			return fmt.Errorf("invalid pairing credential %d", i)
+		}
+	}
+	return nil
+}
+
+func operationKey(method, path string) string { return strings.ToUpper(method) + " " + path }
+
+func validatePromotedOperation(cfg *Config, operation PromotedOperation) error {
+	if operation.ID == "" || operation.Version == "" || operation.Path == "" || !strings.HasPrefix(operation.Path, "/api/") || strings.ContainsAny(operation.Path, "?#") {
+		return fmt.Errorf("operation identity and exact /api path are required")
+	}
+	method := strings.ToUpper(operation.Method)
+	if method != http.MethodGet && method != http.MethodPost && method != http.MethodPut && method != http.MethodPatch && method != http.MethodDelete {
+		return fmt.Errorf("unsupported operation method")
+	}
+	if !isAllowedOrigin(cfg.AllowedOrigins, operation.Origin) {
+		return fmt.Errorf("operation origin is not allowlisted")
+	}
+	reserved := map[string]bool{
+		"origin": true, "target_url": true, "headers": true, "mode": true, "executionmode": true,
+		"selector": true, "css_target": true, "input_fields": true, "session": true, "session_generation": true,
+		"tenant_id": true, "account_id": true, "provider": true, "connection_id": true, "principal_id": true,
+		"operation": true, "operation_id": true, "operation_version": true, "destination_id": true,
+	}
+	if operation.RequestSchema == nil {
+		return fmt.Errorf("request schema is required")
+	}
+	if err := validateRequestSchema(operation.RequestSchema, reserved); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateRequestSchema(schema map[string]RequestField, reserved map[string]bool) error {
+	for name, field := range schema {
+		if name == "" || reserved[strings.ToLower(name)] {
+			return fmt.Errorf("request field %q is reserved", name)
+		}
+		switch field.Type {
+		case JSONString, JSONNumber, JSONInteger, JSONBoolean:
+			if field.Properties != nil || field.Items != nil {
+				return fmt.Errorf("scalar field %q cannot define children", name)
+			}
+		case JSONObject:
+			if field.Properties == nil || field.Items != nil {
+				return fmt.Errorf("object field %q requires properties", name)
+			}
+			if err := validateRequestSchema(field.Properties, reserved); err != nil {
+				return err
+			}
+		case JSONArray:
+			if field.Items == nil || field.Properties != nil {
+				return fmt.Errorf("array field %q requires an item schema", name)
+			}
+			if err := validateRequestSchema(map[string]RequestField{"item": *field.Items}, reserved); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("request field %q has unsupported type", name)
+		}
+	}
+	return nil
 }
 
 func (g *Gateway) Run() error {
@@ -136,7 +240,122 @@ func (g *Gateway) handleGetSpec(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (g *Gateway) handleExternalRequest(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, "no explicitly promoted operation has an enabled T4.2 durable grant gate", http.StatusServiceUnavailable)
+	key := operationKey(r.Method, r.URL.Path)
+	g.mu.RLock()
+	operation, exists := g.operations[key]
+	g.mu.RUnlock()
+	if !exists {
+		http.Error(w, "no promoted operation matches this method and path", http.StatusNotFound)
+		return
+	}
+	if !isAllowedOrigin(g.cfg.AllowedOrigins, operation.Origin) {
+		http.Error(w, "promoted operation origin is not allowlisted", http.StatusForbidden)
+		return
+	}
+	if r.URL.RawQuery != "" {
+		http.Error(w, "query parameters are not part of the promoted typed request", http.StatusBadRequest)
+		return
+	}
+	for name := range r.Header {
+		key := strings.ToLower(name)
+		if key != "content-type" && key != "accept" {
+			http.Error(w, "caller execution overrides are prohibited", http.StatusBadRequest)
+			return
+		}
+	}
+	var raw []byte
+	if r.Body != nil {
+		var err error
+		raw, err = io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+		if err != nil {
+			http.Error(w, "typed request body too large or unreadable", http.StatusRequestEntityTooLarge)
+			return
+		}
+	}
+	fields, err := decodeTypedRequest(raw, operation.RequestSchema)
+	if err != nil {
+		http.Error(w, "invalid typed operation request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	_ = fields // Typed admission is complete; T4.2 still forbids effect dispatch.
+	http.Error(w, "external effects disabled pending T4.2 durable grant gate", http.StatusServiceUnavailable)
+}
+
+func decodeTypedRequest(raw []byte, schema map[string]RequestField) (map[string]json.RawMessage, error) {
+	values := make(map[string]json.RawMessage)
+	if len(bytes.TrimSpace(raw)) > 0 {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		if err := decoder.Decode(&values); err != nil {
+			return nil, fmt.Errorf("body must be a JSON object: %w", err)
+		}
+		var extra interface{}
+		if err := decoder.Decode(&extra); err != io.EOF {
+			return nil, fmt.Errorf("body contains trailing JSON data")
+		}
+	}
+	if err := validateObjectValues(values, schema); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+func validateObjectValues(values map[string]json.RawMessage, schema map[string]RequestField) error {
+	for name := range values {
+		if _, ok := schema[name]; !ok {
+			return fmt.Errorf("unknown field %q", name)
+		}
+	}
+	for name, field := range schema {
+		rawValue, ok := values[name]
+		if !ok {
+			if field.Required {
+				return fmt.Errorf("required field %q is missing", name)
+			}
+			continue
+		}
+		var value interface{}
+		decoder := json.NewDecoder(bytes.NewReader(rawValue))
+		decoder.UseNumber()
+		if err := decoder.Decode(&value); err != nil {
+			return fmt.Errorf("field %q is invalid JSON", name)
+		}
+		valid := false
+		switch field.Type {
+		case JSONString:
+			_, valid = value.(string)
+		case JSONNumber:
+			_, valid = value.(json.Number)
+		case JSONInteger:
+			if n, ok := value.(json.Number); ok {
+				_, err := n.Int64()
+				valid = err == nil
+			}
+		case JSONBoolean:
+			_, valid = value.(bool)
+		case JSONObject:
+			if _, ok := value.(map[string]interface{}); ok {
+				var nested map[string]json.RawMessage
+				if err := json.Unmarshal(rawValue, &nested); err == nil && validateObjectValues(nested, field.Properties) == nil {
+					valid = true
+				}
+			}
+		case JSONArray:
+			if array, ok := value.([]interface{}); ok {
+				valid = true
+				for _, item := range array {
+					encoded, err := json.Marshal(item)
+					if err != nil || validateObjectValues(map[string]json.RawMessage{"item": encoded}, map[string]RequestField{"item": *field.Items}) != nil {
+						valid = false
+						break
+					}
+				}
+			}
+		}
+		if !valid {
+			return fmt.Errorf("field %q does not match its strict %s schema", name, field.Type)
+		}
+	}
+	return nil
 }
 
 func normalizeRequestPath(path string) string {
