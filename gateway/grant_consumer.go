@@ -40,9 +40,10 @@ type GrantPublicKey struct {
 // GrantExecutionBinding is the immutable execution tuple independently
 // resolved from server-owned configuration and current session state.
 type GrantExecutionBinding struct {
-	TenantID, AccountID                           string
+	TenantID, AccountID, ConnectionID             string
 	SessionGeneration                             uint64
 	AdapterName, AdapterVersion, AdapterTransport string
+	ProviderAPIVersion                            string
 	Operation, OperationVersion                   string
 	DestinationID, DestinationHash, ContentHash   string
 }
@@ -170,7 +171,7 @@ func decodeGrantPart(enc *base64.Encoding, part string, max int) ([]byte, error)
 
 func validGrant(m executorGrant, c GrantConsumerConfig, b GrantExecutionBinding, now time.Time) bool {
 	x, g := m.Claims, m.Grant
-	if x.SchemaVersion != "jarmee.control.v1" || x.Issuer != c.Issuer || x.Audience != c.Audience || x.TenantID != c.TenantID || x.TenantID != b.TenantID || x.JTI == "" || x.IssuedAt <= 0 || x.ExpiresAt <= x.IssuedAt || x.ExpiresAt-x.IssuedAt > 60 || x.IssuedAt > now.Unix()+5 || x.ExpiresAt < now.Unix()-5 {
+	if x.SchemaVersion != "jarmee.control.v1" || x.Issuer != c.Issuer || x.Audience != c.Audience || x.TenantID != c.TenantID || x.TenantID != b.TenantID || !grantID(x.JTI) || x.IssuedAt <= 0 || x.ExpiresAt <= x.IssuedAt || x.ExpiresAt-x.IssuedAt > 60 || x.IssuedAt > now.Unix()+5 || x.ExpiresAt < now.Unix()-5 {
 		return false
 	}
 	if g.SchemaVersion != "jarmee.dispatch.v2" || !grantID(g.IntentID) || !grantID(g.TenantID) || g.TenantID != x.TenantID || !grantID(g.PrincipalID) || !grantID(g.ConnectionID) || !grantID(g.AccountID) || !grantID(g.DestinationID) || !grantHash(g.DestinationHash) || !grantHash(g.ContentHash) || !grantID(g.AttemptID) || g.Nonce == "" || g.Conversation == nil {
@@ -196,7 +197,7 @@ func validGrant(m executorGrant, c GrantConsumerConfig, b GrantExecutionBinding,
 	if x.JTI != g.Nonce || time.Unix(x.ExpiresAt, 0).After(g.ExpiresAt) || !g.ExpiresAt.After(time.Unix(x.IssuedAt, 0)) || !g.ExpiresAt.After(now) {
 		return false
 	}
-	return g.TenantID == b.TenantID && g.AccountID == b.AccountID && g.SessionGeneration == b.SessionGeneration && g.Adapter.Name == b.AdapterName && g.Adapter.Version == b.AdapterVersion && g.Adapter.Transport == b.AdapterTransport && g.Operation == b.Operation && g.OperationVersion == b.OperationVersion && g.DestinationID == b.DestinationID && g.DestinationHash == b.DestinationHash && g.ContentHash == b.ContentHash
+	return g.TenantID == b.TenantID && g.ConnectionID == b.ConnectionID && g.Adapter.ProviderAPIVersion == b.ProviderAPIVersion && g.AccountID == b.AccountID && g.SessionGeneration == b.SessionGeneration && g.Adapter.Name == b.AdapterName && g.Adapter.Version == b.AdapterVersion && g.Adapter.Transport == b.AdapterTransport && g.Operation == b.Operation && g.OperationVersion == b.OperationVersion && g.DestinationID == b.DestinationID && g.DestinationHash == b.DestinationHash && g.ContentHash == b.ContentHash
 }
 
 func grantID(s string) bool {
