@@ -58,7 +58,7 @@ chrome.webRequest.onCompleted.addListener(
     sample.status_code = details.statusCode;
     sample.response_headers = headerShape(details.responseHeaders || []);
     // normalize URL into template
-    const [template] = normalizeURL(details.url, sample.host);
+    const [template] = normalizeURL(details.url, allowlist.capture_path_templates?.[sample.host]);
     sample.template = template;
     sample.url_template = template;
     sample.param_values = {};

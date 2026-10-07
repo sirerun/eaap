@@ -62,3 +62,6 @@ A stronger real Chrome assertion exposed an additional capture gap (EAAP-C1): th
 Evidence receipts: pairing-order-red.log, capture-size-red.log and capture-abort-red.log preserve failing regressions; browser-header-metadata-red.log preserves the actual browser failure. eaap-review-final-verify.log records passing Go race tests, vet and lint (zero issues); capture-review-final.log records eight passing Node tests; browser-header-metadata-green.log records both controlled Chrome profiles passing. These repairs require a fresh independent exact-head review. They do not enable execution, qualify live accounts, or complete T4.2.
 
 Primary metadata reference: [Chrome webRequest API](https://developer.chrome.com/docs/extensions/reference/api/webRequest).
+
+
+Capture path privacy: deployment-owned capture_path_templates may map each allowed origin to at most 64 explicit route patterns, for example /api/users/{identifier}. Only matching configured literals are retained; placeholders are renumbered without keeping values. With no matching declaration, every path segment becomes a placeholder. The discovery stream never learns a static route literal from an arbitrary captured name. These declarations describe capture metadata only and do not promote an executable operation. Pending requests retain no path at all until completion.
